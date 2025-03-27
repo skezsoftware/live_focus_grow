@@ -1,7 +1,7 @@
-from app import db
+from app.extensions import db
 from datetime import datetime, timezone
 
-class User(db.model):
+class User(db.Model):
     __tablename__ = 'users'
 
     id = db.Column(db.String(36), primary_key=True)
