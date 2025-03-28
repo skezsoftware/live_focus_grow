@@ -1,11 +1,16 @@
 from flask import Flask, jsonify
-from config import Config
+from config import Config, TestingConfig
 from flask_cors import CORS
 from app.extensions import db, migrate, jwt
 
-def create_app(config_class=Config):
+def create_app(config_name='default'):
     app = Flask(__name__)
-    app.config.from_object(config_class)
+    
+    # Select configuration
+    if config_name == 'testing':
+        app.config.from_object(TestingConfig)
+    else:
+        app.config.from_object(Config)
     
     # Initialize extensions
     db.init_app(app)
@@ -16,9 +21,11 @@ def create_app(config_class=Config):
     # Register blueprints
     from app.routes.auth import auth_bp
     from app.routes.user import user_bp
+    from app.routes.tracking import tracking_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(user_bp, url_prefix='/api/user')
+    app.register_blueprint(tracking_bp, url_prefix='/api/tracking')
 
     @app.route('/')
     def test_route():
