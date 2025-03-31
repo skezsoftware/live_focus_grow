@@ -1,11 +1,14 @@
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.models import Journal, WeightLog, ProgressPhoto
+from app.models.tracking import Journal, WeightLog, ProgressPhoto
+from app.models.activity import Activity, UserActivity
+from app.models.user import User
 from app.extensions import db
 import uuid
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import desc, func
 import json
+from app.decorators import token_required
 
 tracking_bp = Blueprint('tracking', __name__)
 
@@ -489,4 +492,421 @@ def get_progress_summary():
         'category_photos': category_photos,
         'weight_stats': weight_stats,
         'total_photos': len(photos)
+    })
+
+# Activity Management Routes
+@tracking_bp.route('/all-activities', methods=['GET'])
+@jwt_required()
+def get_all_activities():
+    try:
+        print("\n=== GET /all-activities ===")
+        
+        # Define default activities that should always be available
+        default_activities = [
+            {
+                'id': '1',
+                'name': 'Weight Lifting',
+                'category': 'Mind + Body',
+                'type': 'exercise',
+                'is_custom': False
+            },
+            {
+                'id': '2',
+                'name': 'Reading',
+                'category': 'Mind + Body',
+                'type': 'learning',
+                'is_custom': False
+            },
+            {
+                'id': '3',
+                'name': 'Family Activity',
+                'category': 'Purpose + People',
+                'type': 'social',
+                'is_custom': False
+            },
+            {
+                'id': '4',
+                'name': 'Learning New Skill',
+                'category': 'Growth + Creation',
+                'type': 'learning',
+                'is_custom': False
+            },
+            {
+                'id': '5',
+                'name': 'Boxing',
+                'category': 'Mind + Body',
+                'type': 'exercise',
+                'is_custom': False
+            },
+            {
+                'id': '6',
+                'name': 'Meditation',
+                'category': 'Mind + Body',
+                'type': 'mindfulness',
+                'is_custom': False
+            },
+            {
+                'id': '7',
+                'name': 'Online Course',
+                'category': 'Growth + Creation',
+                'type': 'learning',
+                'is_custom': False
+            },
+            {
+                'id': '8',
+                'name': 'Creative Writing',
+                'category': 'Growth + Creation',
+                'type': 'creativity',
+                'is_custom': False
+            },
+            {
+                'id': '9',
+                'name': 'Volunteer Work',
+                'category': 'Purpose + People',
+                'type': 'social',
+                'is_custom': False
+            },
+            {
+                'id': '10',
+                'name': 'Mentoring',
+                'category': 'Purpose + People',
+                'type': 'social',
+                'is_custom': False
+            }
+        ]
+        
+        # Initialize categorized activities with default activities
+        categorized = {
+            "Mind + Body": [],
+            "Growth + Creation": [],
+            "Purpose + People": []
+        }
+        
+        # Add default activities to their categories
+        for activity in default_activities:
+            if activity['category'] in categorized:
+                categorized[activity['category']].append(activity)
+        
+        # Get custom activities from database
+        user_id = get_jwt_identity()
+        custom_activities = Activity.query.filter_by(user_id=user_id, is_custom=True).all()
+        
+        # Add custom activities to the lists
+        for activity in custom_activities:
+            activity_data = {
+                'id': str(activity.id),
+                'name': activity.name,
+                'category': activity.category,
+                'type': activity.type,
+                'is_custom': True
+            }
+            if activity.category in categorized:
+                categorized[activity.category].append(activity_data)
+                default_activities.append(activity_data)
+        
+        print("Activities by category:")
+        for category, acts in categorized.items():
+            print(f"{category}: {len(acts)} activities")
+            for act in acts:
+                print(f"  - {act['name']} ({act['type']})")
+        
+        response_data = {
+            'activities': default_activities,
+            'categorized_activities': categorized
+        }
+        
+        print("Sending response:", response_data)
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        print(f"Error in get_all_activities: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@tracking_bp.route('/activities', methods=['GET'])
+@jwt_required()
+def get_activities():
+    # Redirect to all-activities endpoint to ensure consistency
+    return get_all_activities()
+
+@tracking_bp.route('/activities', methods=['POST'])
+@jwt_required()
+def update_selected_activities():
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json()
+        activities = data.get('activities', [])
+        
+        # First, mark all existing activities as inactive
+        UserActivity.query.filter_by(user_id=user_id).update({'is_active': False})
+        db.session.commit()
+        
+        # Add new activities
+        for activity_data in activities:
+            # Check if activity already exists
+            existing_activity = UserActivity.query.filter_by(
+                user_id=user_id,
+                activity_id=activity_data['id']
+            ).first()
+            
+            if existing_activity:
+                # Update existing activity
+                existing_activity.is_active = True
+                existing_activity.activity_name = activity_data['name']
+                existing_activity.category = activity_data['category']
+                existing_activity.type = activity_data.get('type', 'custom')
+            else:
+                # Create new activity
+                new_activity = UserActivity(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    activity_id=activity_data['id'],
+                    activity_name=activity_data['name'],
+                    category=activity_data['category'],
+                    type=activity_data.get('type', 'custom'),
+                    is_active=True
+                )
+                db.session.add(new_activity)
+        
+        # Update user's XP
+        user = User.query.get(user_id)
+        if user:
+            user.current_xp += len(activities) * 10  # 10 XP per activity
+            new_level = (user.current_xp // 100) + 1
+            level_up = new_level > user.level
+            user.level = new_level
+        
+        db.session.commit()
+        return jsonify({
+            'message': 'Activities updated successfully',
+            'activities_count': len(activities),
+            'current_xp': user.current_xp if user else 0,
+            'level': user.level if user else 1,
+            'level_up': level_up if user else False
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+BASE_XP = 500  # Base XP for completing all daily activities
+
+@tracking_bp.route('/activities/<activity_id>/toggle', methods=['POST'])
+@jwt_required()
+def toggle_activity(activity_id):
+    user_id = get_jwt_identity()
+    user = User.query.get_or_404(user_id)
+    
+    try:
+        # Find the activity in default activities or custom activities
+        activity = None
+        default_activities = [
+            {'id': '1', 'name': 'Weight Lifting', 'category': 'Mind + Body', 'type': 'exercise'},
+            {'id': '2', 'name': 'Reading', 'category': 'Mind + Body', 'type': 'learning'},
+            {'id': '3', 'name': 'Family Activity', 'category': 'Purpose + People', 'type': 'social'},
+            {'id': '4', 'name': 'Learning New Skill', 'category': 'Growth + Creation', 'type': 'learning'},
+            {'id': '5', 'name': 'Boxing', 'category': 'Mind + Body', 'type': 'exercise'},
+            {'id': '6', 'name': 'Meditation', 'category': 'Mind + Body', 'type': 'mindfulness'},
+            {'id': '7', 'name': 'Online Course', 'category': 'Growth + Creation', 'type': 'learning'},
+            {'id': '8', 'name': 'Creative Writing', 'category': 'Growth + Creation', 'type': 'creativity'},
+            {'id': '9', 'name': 'Volunteer Work', 'category': 'Purpose + People', 'type': 'social'},
+            {'id': '10', 'name': 'Mentoring', 'category': 'Purpose + People', 'type': 'social'}
+        ]
+        
+        # Check default activities first
+        activity = next((a for a in default_activities if a['id'] == activity_id), None)
+        
+        # If not found in defaults, check database
+        if not activity:
+            db_activity = Activity.query.get(activity_id)
+            if db_activity:
+                activity = {
+                    'id': db_activity.id,
+                    'name': db_activity.name,
+                    'category': db_activity.category,
+                    'type': db_activity.type
+                }
+        
+        if not activity:
+            return jsonify({'error': 'Activity not found'}), 404
+        
+        # Check if activity was already completed today
+        today = datetime.now(timezone.utc).date()
+        user_activity = UserActivity.query.filter_by(
+            user_id=user_id,
+            activity_id=activity_id,
+            date=today
+        ).first()
+        
+        if user_activity:
+            # If already completed, uncomplete it
+            db.session.delete(user_activity)
+            completed = False
+            message = "Activity uncompleted"
+            xp_gained = 0
+        else:
+            # Delete any existing activity for this user and activity_id (regardless of date)
+            UserActivity.query.filter_by(
+                user_id=user_id,
+                activity_id=activity_id
+            ).delete()
+            
+            # Complete the activity
+            user_activity = UserActivity(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                activity_id=activity_id,
+                activity_name=activity['name'],
+                category=activity['category'],
+                type=activity['type'],
+                date=today,
+                completed=True,
+                is_active=True
+            )
+            db.session.add(user_activity)
+            
+            # Calculate XP gain
+            base_xp = 500  # Base XP per activity
+            multiplier = min(user.streak_days + 1, 4)  # Cap multiplier at 4x
+            xp_gained = base_xp * multiplier
+            
+            # Update user's XP and check for level up
+            user.current_xp += xp_gained
+            old_level = user.level
+            user.level = (user.current_xp // 1000) + 1  # Level up every 1000 XP
+            
+            completed = True
+            message = f"Activity completed! You earned {xp_gained} XP with a {multiplier}x multiplier!"
+            
+            if user.level > old_level:
+                message += f" Level up! You are now level {user.level}!"
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': message,
+            'completed': completed,
+            'level': user.level,
+            'current_xp': user.current_xp,
+            'xp_to_next_level': 1000,  # Fixed XP per level
+            'streak_days': user.streak_days,
+            'multiplier': min(user.streak_days + 1, 4),
+            'xp_gained': xp_gained
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error toggling activity: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@tracking_bp.route('/custom-activities', methods=['GET'])
+@jwt_required()
+def get_custom_activities():
+    user_id = get_jwt_identity()
+    
+    # Get all custom activities for the user
+    custom_activities = Activity.query.filter_by(
+        user_id=user_id,
+        is_custom=True
+    ).all()
+    
+    return jsonify({
+        'activities': [{
+            'id': activity.id,
+            'name': activity.name,
+            'category': activity.category,
+            'type': activity.type,
+            'is_custom': activity.is_custom
+        } for activity in custom_activities]
+    })
+
+@tracking_bp.route('/custom-activities', methods=['POST'])
+@jwt_required()
+def create_custom_activity():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    
+    # Validate required fields
+    required_fields = ['name', 'category']
+    for field in required_fields:
+        if field not in data:
+            return jsonify({'error': f'{field} is required'}), 400
+    
+    # Create new custom activity
+    new_activity = Activity(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        name=data['name'],
+        category=data['category'],
+        type=data.get('type', 'custom'),
+        is_custom=True
+    )
+    
+    db.session.add(new_activity)
+    db.session.commit()
+    
+    return jsonify({
+        'id': new_activity.id,
+        'name': new_activity.name,
+        'category': new_activity.category,
+        'type': new_activity.type,
+        'is_custom': new_activity.is_custom
+    }), 201
+
+@tracking_bp.route('/custom-activities/<activity_id>', methods=['DELETE'])
+@jwt_required()
+def delete_custom_activity(activity_id):
+    try:
+        user_id = get_jwt_identity()
+        
+        # Find the custom activity
+        activity = Activity.query.filter_by(
+            id=activity_id,
+            is_custom=True
+        ).first()
+        
+        if not activity:
+            return jsonify({'error': 'Custom activity not found'}), 404
+            
+        # Delete the activity
+        db.session.delete(activity)
+        
+        # Also delete any user activity references
+        UserActivity.query.filter_by(
+            activity_id=activity_id
+        ).delete()
+        
+        db.session.commit()
+        
+        return jsonify({'message': 'Custom activity deleted successfully'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error deleting custom activity: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@tracking_bp.route('/user-stats', methods=['GET'])
+@jwt_required()
+def get_user_stats():
+    user_id = get_jwt_identity()
+    user = User.query.get_or_404(user_id)
+    
+    # Get today's completed activities count
+    today = datetime.now(timezone.utc).date()
+    completed_today = UserActivity.query.filter_by(
+        user_id=user_id,
+        date=today
+    ).count()
+    
+    # Get total selected activities
+    selected_activities = Activity.query.join(UserActivity).filter(
+        UserActivity.user_id == user_id
+    ).distinct().count()
+    
+    return jsonify({
+        'level': user.level,
+        'current_xp': user.current_xp,
+        'xp_to_next_level': user.xp_to_next_level,
+        'streak_days': user.streak_days,
+        'multiplier': user.multiplier,
+        'completed_today': completed_today,
+        'total_activities': selected_activities
     }) 
