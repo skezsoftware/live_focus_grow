@@ -6,11 +6,28 @@ from app.models.user import User
 from app.extensions import db
 import uuid
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, and_, or_
 import json
 from app.decorators import token_required
+import math
 
 tracking_bp = Blueprint('tracking', __name__)
+
+def calculate_xp_for_level(level):
+    """Calculate XP needed for a specific level."""
+    return int(500 + pow(level, 1.5))
+
+def get_current_level_and_next_xp(total_xp):
+    """
+    Calculate current level and XP needed for next level based on total XP.
+    Returns (current_level, xp_needed_for_next_level)
+    """
+    level = 1
+    while True:
+        next_level_xp = calculate_xp_for_level(level + 1)
+        if total_xp < next_level_xp:
+            return level, next_level_xp
+        level += 1
 
 def get_pagination_params():
     page = request.args.get('page', 1, type=int)
@@ -495,133 +512,6 @@ def get_progress_summary():
     })
 
 # Activity Management Routes
-@tracking_bp.route('/all-activities', methods=['GET'])
-@jwt_required()
-def get_all_activities():
-    try:
-        print("\n=== GET /all-activities ===")
-        
-        # Define default activities that should always be available
-        default_activities = [
-            {
-                'id': '1',
-                'name': 'Weight Lifting',
-                'category': 'Mind + Body',
-                'type': 'exercise',
-                'is_custom': False
-            },
-            {
-                'id': '2',
-                'name': 'Reading',
-                'category': 'Mind + Body',
-                'type': 'learning',
-                'is_custom': False
-            },
-            {
-                'id': '3',
-                'name': 'Family Activity',
-                'category': 'Purpose + People',
-                'type': 'social',
-                'is_custom': False
-            },
-            {
-                'id': '4',
-                'name': 'Learning New Skill',
-                'category': 'Growth + Creation',
-                'type': 'learning',
-                'is_custom': False
-            },
-            {
-                'id': '5',
-                'name': 'Boxing',
-                'category': 'Mind + Body',
-                'type': 'exercise',
-                'is_custom': False
-            },
-            {
-                'id': '6',
-                'name': 'Meditation',
-                'category': 'Mind + Body',
-                'type': 'mindfulness',
-                'is_custom': False
-            },
-            {
-                'id': '7',
-                'name': 'Online Course',
-                'category': 'Growth + Creation',
-                'type': 'learning',
-                'is_custom': False
-            },
-            {
-                'id': '8',
-                'name': 'Creative Writing',
-                'category': 'Growth + Creation',
-                'type': 'creativity',
-                'is_custom': False
-            },
-            {
-                'id': '9',
-                'name': 'Volunteer Work',
-                'category': 'Purpose + People',
-                'type': 'social',
-                'is_custom': False
-            },
-            {
-                'id': '10',
-                'name': 'Mentoring',
-                'category': 'Purpose + People',
-                'type': 'social',
-                'is_custom': False
-            }
-        ]
-        
-        # Initialize categorized activities with default activities
-        categorized = {
-            "Mind + Body": [],
-            "Growth + Creation": [],
-            "Purpose + People": []
-        }
-        
-        # Add default activities to their categories
-        for activity in default_activities:
-            if activity['category'] in categorized:
-                categorized[activity['category']].append(activity)
-        
-        # Get custom activities from database
-        user_id = get_jwt_identity()
-        custom_activities = Activity.query.filter_by(user_id=user_id, is_custom=True).all()
-        
-        # Add custom activities to the lists
-        for activity in custom_activities:
-            activity_data = {
-                'id': str(activity.id),
-                'name': activity.name,
-                'category': activity.category,
-                'type': activity.type,
-                'is_custom': True
-            }
-            if activity.category in categorized:
-                categorized[activity.category].append(activity_data)
-                default_activities.append(activity_data)
-        
-        print("Activities by category:")
-        for category, acts in categorized.items():
-            print(f"{category}: {len(acts)} activities")
-            for act in acts:
-                print(f"  - {act['name']} ({act['type']})")
-        
-        response_data = {
-            'activities': default_activities,
-            'categorized_activities': categorized
-        }
-        
-        print("Sending response:", response_data)
-        return jsonify(response_data), 200
-        
-    except Exception as e:
-        print(f"Error in get_all_activities: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
 @tracking_bp.route('/activities', methods=['GET'])
 @jwt_required()
 def get_activities():
@@ -631,61 +521,147 @@ def get_activities():
 @tracking_bp.route('/activities', methods=['POST'])
 @jwt_required()
 def update_selected_activities():
+    user_id = get_jwt_identity()
+    
     try:
-        user_id = get_jwt_identity()
         data = request.get_json()
-        activities = data.get('activities', [])
+        selected_activities = data.get('selected_activities', [])
         
-        # First, mark all existing activities as inactive
-        UserActivity.query.filter_by(user_id=user_id).update({'is_active': False})
-        db.session.commit()
+        # Validate the data structure
+        if not isinstance(selected_activities, list):
+            return jsonify({'error': 'Invalid data format'}), 400
         
-        # Add new activities
-        for activity_data in activities:
-            # Check if activity already exists
-            existing_activity = UserActivity.query.filter_by(
-                user_id=user_id,
-                activity_id=activity_data['id']
+        # Get all current active selections for the user
+        current_selections = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.is_active == True
+        ).all()
+        
+        # Deactivate all current selections
+        for selection in current_selections:
+            selection.is_active = False
+        
+        # Create or update new selections
+        today = datetime.now(timezone.utc).date()
+        for activity_id in selected_activities:
+            # Get the activity details
+            activity = Activity.query.get(activity_id)
+            if not activity:
+                continue
+                
+            # Try to find any existing record for this activity (regardless of date)
+            user_activity = UserActivity.query.filter(
+                UserActivity.user_id == user_id,
+                UserActivity.activity_id == activity_id
             ).first()
             
-            if existing_activity:
-                # Update existing activity
-                existing_activity.is_active = True
-                existing_activity.activity_name = activity_data['name']
-                existing_activity.category = activity_data['category']
-                existing_activity.type = activity_data.get('type', 'custom')
+            if user_activity:
+                # Update existing record
+                user_activity.is_active = True
+                user_activity.date = today  # Update the date to today
+                user_activity.completed = False  # Reset completion status
+                user_activity.is_completed_today = False  # Reset daily completion
             else:
-                # Create new activity
-                new_activity = UserActivity(
+                # Create new record
+                new_selection = UserActivity(
                     id=str(uuid.uuid4()),
                     user_id=user_id,
-                    activity_id=activity_data['id'],
-                    activity_name=activity_data['name'],
-                    category=activity_data['category'],
-                    type=activity_data.get('type', 'custom'),
-                    is_active=True
+                    activity_id=activity_id,
+                    activity_name=activity.name,
+                    category=activity.category,
+                    type=activity.type,
+                    date=today,
+                    is_active=True,
+                    completed=False,
+                    is_completed_today=False
                 )
-                db.session.add(new_activity)
-        
-        # Update user's XP
-        user = User.query.get(user_id)
-        if user:
-            user.current_xp += len(activities) * 10  # 10 XP per activity
-            new_level = (user.current_xp // 100) + 1
-            level_up = new_level > user.level
-            user.level = new_level
+                db.session.add(new_selection)
         
         db.session.commit()
-        return jsonify({
-            'message': 'Activities updated successfully',
-            'activities_count': len(activities),
-            'current_xp': user.current_xp if user else 0,
-            'level': user.level if user else 1,
-            'level_up': level_up if user else False
-        }), 200
+        return jsonify({'message': 'Activities updated successfully'})
+        
     except Exception as e:
         db.session.rollback()
+        print(f"Error updating activities: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@tracking_bp.route('/all-activities', methods=['GET'])
+@jwt_required()
+def get_all_activities():
+    user_id = get_jwt_identity()
+    
+    try:
+        print(f"[DEBUG] Fetching activities for user {user_id}")
+        
+        # Get default activities and user's custom activities
+        activities = Activity.query.filter(
+            or_(
+                and_(Activity.user_id.is_(None), Activity.is_active == True),  # Default activities
+                and_(Activity.user_id == user_id, Activity.is_custom == True)   # User's custom activities
+            )
+        ).all()
+        
+        print(f"[DEBUG] Found {len(activities)} total activities")
+        
+        # Get today's date
+        today = datetime.now(timezone.utc).date()
+        
+        # Get user's active selections and completed activities for today
+        user_activities = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            or_(
+                UserActivity.is_active == True,  # Get all active selections
+                and_(UserActivity.date == today, UserActivity.is_completed_today == True)  # Get today's completed activities
+            )
+        ).all()
+        
+        print(f"[DEBUG] Found {len(user_activities)} user activities")
+        
+        # Create sets for quick lookups
+        selected_activity_ids = {ua.activity_id for ua in user_activities if ua.is_active}
+        completed_activity_ids = {ua.activity_id for ua in user_activities if ua.is_completed_today}
+        
+        print(f"[DEBUG] Active activity IDs: {selected_activity_ids}")
+        print(f"[DEBUG] Completed activity IDs: {completed_activity_ids}")
+        
+        # Create a list of all activities with their selection status
+        activities_list = []
+        categorized_activities = {}
+        
+        for activity in activities:
+            is_active = activity.id in selected_activity_ids
+            completed_today = activity.id in completed_activity_ids
+            print(f"[DEBUG] Activity {activity.id} ({activity.name}) - is_active: {is_active}, completed_today: {completed_today}")
+            
+            activity_data = {
+                'id': activity.id,
+                'name': activity.name,
+                'category': activity.category,
+                'type': activity.type,
+                'is_custom': activity.is_custom,
+                'is_active': is_active,
+                'completed_today': completed_today
+            }
+            
+            activities_list.append(activity_data)
+            
+            # Organize by category
+            if activity.category not in categorized_activities:
+                categorized_activities[activity.category] = []
+            categorized_activities[activity.category].append(activity_data)
+        
+        print(f"[DEBUG] Returning {len(activities_list)} activities")
+        return jsonify({
+            'activities': activities_list,
+            'categorized_activities': categorized_activities
+        })
+        
+    except Exception as e:
+        print(f"[ERROR] Error fetching activities: {str(e)}")
+        return jsonify({
+            'activities': [],
+            'categorized_activities': {}
+        }), 500
 
 BASE_XP = 500  # Base XP for completing all daily activities
 
@@ -696,105 +672,178 @@ def toggle_activity(activity_id):
     user = User.query.get_or_404(user_id)
     
     try:
-        # Find the activity in default activities or custom activities
-        activity = None
-        default_activities = [
-            {'id': '1', 'name': 'Weight Lifting', 'category': 'Mind + Body', 'type': 'exercise'},
-            {'id': '2', 'name': 'Reading', 'category': 'Mind + Body', 'type': 'learning'},
-            {'id': '3', 'name': 'Family Activity', 'category': 'Purpose + People', 'type': 'social'},
-            {'id': '4', 'name': 'Learning New Skill', 'category': 'Growth + Creation', 'type': 'learning'},
-            {'id': '5', 'name': 'Boxing', 'category': 'Mind + Body', 'type': 'exercise'},
-            {'id': '6', 'name': 'Meditation', 'category': 'Mind + Body', 'type': 'mindfulness'},
-            {'id': '7', 'name': 'Online Course', 'category': 'Growth + Creation', 'type': 'learning'},
-            {'id': '8', 'name': 'Creative Writing', 'category': 'Growth + Creation', 'type': 'creativity'},
-            {'id': '9', 'name': 'Volunteer Work', 'category': 'Purpose + People', 'type': 'social'},
-            {'id': '10', 'name': 'Mentoring', 'category': 'Purpose + People', 'type': 'social'}
-        ]
+        print(f"[DEBUG] Toggle activity request for user {user_id}, activity {activity_id}")
+        print(f"[DEBUG] Initial user state - Level: {user.level}, XP: {user.current_xp}, Streak: {user.streak_days}")
         
-        # Check default activities first
-        activity = next((a for a in default_activities if a['id'] == activity_id), None)
-        
-        # If not found in defaults, check database
-        if not activity:
-            db_activity = Activity.query.get(activity_id)
-            if db_activity:
-                activity = {
-                    'id': db_activity.id,
-                    'name': db_activity.name,
-                    'category': db_activity.category,
-                    'type': db_activity.type
-                }
-        
-        if not activity:
+        # Find the activity
+        db_activity = Activity.query.get(activity_id)
+        if not db_activity:
             return jsonify({'error': 'Activity not found'}), 404
         
-        # Check if activity was already completed today
+        # Get today's and yesterday's dates
         today = datetime.now(timezone.utc).date()
-        user_activity = UserActivity.query.filter_by(
-            user_id=user_id,
-            activity_id=activity_id,
-            date=today
+        yesterday = today - timedelta(days=1)
+        
+        # Check if this is a completion request or just a selection toggle
+        is_completion = False
+        if request.args.get('complete', 'false').lower() == 'true':
+            is_completion = True
+        elif request.is_json and request.get_json():
+            is_completion = request.get_json().get('is_completion', False)
+            
+        print(f"[DEBUG] Request type - is_completion: {is_completion}")
+        
+        # Initialize response values
+        message = ""
+        xp_gained = 0
+        new_level = user.level
+        xp_to_next = calculate_xp_for_level(user.level + 1)
+        current_multiplier = 1  # Default multiplier
+        
+        # First, try to find any existing record for this activity (regardless of date)
+        existing_activity = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.activity_id == activity_id
         ).first()
         
-        if user_activity:
-            # If already completed, uncomplete it
-            db.session.delete(user_activity)
-            completed = False
-            message = "Activity uncompleted"
-            xp_gained = 0
-        else:
-            # Delete any existing activity for this user and activity_id (regardless of date)
-            UserActivity.query.filter_by(
-                user_id=user_id,
-                activity_id=activity_id
-            ).delete()
+        if existing_activity:
+            print(f"[DEBUG] Found existing activity record - current state: completed={existing_activity.completed}, is_active={existing_activity.is_active}")
             
-            # Complete the activity
-            user_activity = UserActivity(
+            # Update the existing record
+            if is_completion:
+                # Only complete if not already completed today
+                if not existing_activity.is_completed_today:
+                    existing_activity.completed = True
+                    existing_activity.is_completed_today = True
+                    # Don't modify is_active when completing
+                    print(f"[DEBUG] Completing activity - preserving is_active={existing_activity.is_active}")
+                    
+                    # Calculate XP gain using current streak (before any updates)
+                    base_xp = 100
+                    
+                    # Check if user completed any activities yesterday
+                    yesterday_completed = UserActivity.query.filter(
+                        UserActivity.user_id == user_id,
+                        UserActivity.date == yesterday,
+                        UserActivity.is_completed_today == True
+                    ).count() > 0
+                    
+                    # Update streak based on yesterday's completion
+                    if yesterday_completed:
+                        user.streak_days = min(user.streak_days + 1, 4)
+                        print(f"[DEBUG] Streak continued - new streak: {user.streak_days}")
+                    else:
+                        user.streak_days = 1
+                        print(f"[DEBUG] Streak reset - new streak: 1")
+                    
+                    # Calculate multiplier based on current streak
+                    current_multiplier = max(1, min(user.streak_days, 4))
+                    xp_gained = base_xp * current_multiplier
+                    print(f"[DEBUG] XP Calculation - Base XP: {base_xp}, Current Streak: {user.streak_days}, Multiplier: {current_multiplier}")
+                    
+                    # Update user's XP
+                    user.current_xp += xp_gained
+                    
+                    # Calculate new level based on current XP
+                    new_level, xp_to_next = get_current_level_and_next_xp(user.current_xp)
+                    user.level = new_level
+                    
+                    message = f"Activity completed! You earned {xp_gained} XP with a {current_multiplier}x multiplier!"
+                    if new_level > user.level:
+                        message += f" Level up! You are now level {new_level}!"
+                    
+                    print(f"[DEBUG] Activity completed - XP gained: {xp_gained}, New streak: {user.streak_days}")
+                else:
+                    message = "Activity already completed today"
+                    print("[DEBUG] Activity was already completed today - no changes made")
+                    return jsonify({
+                        'message': message,
+                        'completed': True,
+                        'is_active': existing_activity.is_active,
+                        'level': user.level,
+                        'current_xp': user.current_xp,
+                        'streak_days': user.streak_days,
+                        'multiplier': current_multiplier
+                    })
+            else:
+                # Just toggle selection state
+                existing_activity.is_active = not existing_activity.is_active
+                message = "Activity selection updated"
+                print(f"[DEBUG] Toggled selection state - new is_active: {existing_activity.is_active}")
+        else:
+            # Create new record if none exists
+            new_activity = UserActivity(
                 id=str(uuid.uuid4()),
                 user_id=user_id,
                 activity_id=activity_id,
-                activity_name=activity['name'],
-                category=activity['category'],
-                type=activity['type'],
+                activity_name=db_activity.name,
+                category=db_activity.category,
+                type=db_activity.type,
                 date=today,
-                completed=True,
-                is_active=True
+                completed=is_completion,
+                is_completed_today=is_completion,
+                is_active=True  # Always set is_active to true for new records
             )
-            db.session.add(user_activity)
+            db.session.add(new_activity)
+            print(f"[DEBUG] Created new activity record - completed: {is_completion}, is_active: true")
+            message = "Activity selection created"
             
-            # Calculate XP gain
-            base_xp = 500  # Base XP per activity
-            multiplier = min(user.streak_days + 1, 4)  # Cap multiplier at 4x
-            xp_gained = base_xp * multiplier
-            
-            # Update user's XP and check for level up
-            user.current_xp += xp_gained
-            old_level = user.level
-            user.level = (user.current_xp // 1000) + 1  # Level up every 1000 XP
-            
-            completed = True
-            message = f"Activity completed! You earned {xp_gained} XP with a {multiplier}x multiplier!"
-            
-            if user.level > old_level:
-                message += f" Level up! You are now level {user.level}!"
+            # If this is a completion, handle XP and streak updates
+            if is_completion:
+                base_xp = 100
+                
+                # Check if user completed any activities yesterday
+                yesterday_completed = UserActivity.query.filter(
+                    UserActivity.user_id == user_id,
+                    UserActivity.date == yesterday,
+                    UserActivity.is_completed_today == True
+                ).count() > 0
+                
+                # Update streak based on yesterday's completion
+                if yesterday_completed:
+                    user.streak_days = min(user.streak_days + 1, 4)
+                    print(f"[DEBUG] Streak continued - new streak: {user.streak_days}")
+                else:
+                    user.streak_days = 1
+                    print(f"[DEBUG] Streak reset - new streak: 1")
+                
+                # Calculate multiplier based on current streak
+                current_multiplier = max(1, min(user.streak_days, 4))
+                xp_gained = base_xp * current_multiplier
+                user.current_xp += xp_gained
+                new_level, xp_to_next = get_current_level_and_next_xp(user.current_xp)
+                user.level = new_level
         
         db.session.commit()
         
-        return jsonify({
-            'message': message,
-            'completed': completed,
-            'level': user.level,
-            'current_xp': user.current_xp,
-            'xp_to_next_level': 1000,  # Fixed XP per level
-            'streak_days': user.streak_days,
-            'multiplier': min(user.streak_days + 1, 4),
-            'xp_gained': xp_gained
-        })
+        print(f"[DEBUG] Final user state - Level: {user.level}, XP: {user.current_xp}, Streak: {user.streak_days}")
+        
+        # Return appropriate response based on operation type
+        if is_completion:
+            return jsonify({
+                'message': message,
+                'completed': True,
+                'level': new_level,
+                'current_xp': user.current_xp,
+                'xp_to_next_level': xp_to_next,
+                'streak_days': user.streak_days,
+                'multiplier': current_multiplier,
+                'xp_gained': xp_gained,
+                'is_active': existing_activity.is_active if existing_activity else True
+            })
+        else:
+            return jsonify({
+                'message': message,
+                'completed': False,
+                'is_active': existing_activity.is_active if existing_activity else True,
+                'level': user.level,
+                'current_xp': user.current_xp,
+                'streak_days': user.streak_days
+            })
         
     except Exception as e:
         db.session.rollback()
-        print(f"Error toggling activity: {str(e)}")
+        print(f"[ERROR] Error in toggle_activity: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @tracking_bp.route('/custom-activities', methods=['GET'])
@@ -825,88 +874,122 @@ def create_custom_activity():
     data = request.get_json()
     
     # Validate required fields
-    required_fields = ['name', 'category']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'error': f'{field} is required'}), 400
-    
-    # Create new custom activity
-    new_activity = Activity(
-        id=str(uuid.uuid4()),
-        user_id=user_id,
-        name=data['name'],
-        category=data['category'],
-        type=data.get('type', 'custom'),
-        is_custom=True
-    )
-    
-    db.session.add(new_activity)
-    db.session.commit()
-    
-    return jsonify({
-        'id': new_activity.id,
-        'name': new_activity.name,
-        'category': new_activity.category,
-        'type': new_activity.type,
-        'is_custom': new_activity.is_custom
-    }), 201
+    if not data.get('name'):
+        return jsonify({'error': 'Activity name is required'}), 400
+    if not data.get('category'):
+        return jsonify({'error': 'Activity category is required'}), 400
+        
+    try:
+        # Create new custom activity
+        new_activity = Activity(
+            id=str(uuid.uuid4()),
+            user_id=user_id,  # Associate with the current user
+            name=data['name'],
+            category=data['category'],
+            type=data.get('type', 'custom'),
+            is_custom=True,
+            is_active=True
+        )
+        
+        db.session.add(new_activity)
+        db.session.commit()
+        
+        return jsonify({
+            'id': new_activity.id,
+            'name': new_activity.name,
+            'category': new_activity.category,
+            'type': new_activity.type,
+            'is_custom': True
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error creating custom activity: {str(e)}")
+        return jsonify({'error': 'Failed to create custom activity'}), 500
 
 @tracking_bp.route('/custom-activities/<activity_id>', methods=['DELETE'])
 @jwt_required()
 def delete_custom_activity(activity_id):
+    user_id = get_jwt_identity()
+    
     try:
-        user_id = get_jwt_identity()
-        
-        # Find the custom activity
+        # Find the activity and verify it belongs to the user
         activity = Activity.query.filter_by(
             id=activity_id,
+            user_id=user_id,
             is_custom=True
-        ).first()
+        ).first_or_404()
         
-        if not activity:
-            return jsonify({'error': 'Custom activity not found'}), 404
-            
+        # Delete any associated user_activity records
+        UserActivity.query.filter_by(activity_id=activity_id).delete()
+        
         # Delete the activity
         db.session.delete(activity)
-        
-        # Also delete any user activity references
-        UserActivity.query.filter_by(
-            activity_id=activity_id
-        ).delete()
-        
         db.session.commit()
         
-        return jsonify({'message': 'Custom activity deleted successfully'}), 200
+        return jsonify({'message': 'Custom activity deleted successfully'})
         
     except Exception as e:
         db.session.rollback()
         print(f"Error deleting custom activity: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Failed to delete custom activity'}), 500
 
 @tracking_bp.route('/user-stats', methods=['GET'])
 @jwt_required()
 def get_user_stats():
-    user_id = get_jwt_identity()
-    user = User.query.get_or_404(user_id)
-    
-    # Get today's completed activities count
-    today = datetime.now(timezone.utc).date()
-    completed_today = UserActivity.query.filter_by(
-        user_id=user_id,
-        date=today
-    ).count()
-    
-    # Get total selected activities
-    selected_activities = Activity.query.join(UserActivity).filter(
-        UserActivity.user_id == user_id
-    ).distinct().count()
-    
-    return jsonify({
-        'level': user.level,
-        'current_xp': user.current_xp,
-        'xp_to_next_level': user.xp_to_next_level,
-        'streak_days': user.streak_days,
-        'multiplier': user.multiplier,
-        'completed_today': completed_today,
-        'total_activities': selected_activities
-    }) 
+    try:
+        user_id = get_jwt_identity()
+        user = User.query.get_or_404(user_id)
+        
+        # Calculate current level and XP needed for next level
+        current_level, xp_to_next = get_current_level_and_next_xp(user.current_xp)
+        
+        # Get today's and yesterday's dates
+        today = datetime.now(timezone.utc).date()
+        yesterday = today - timedelta(days=1)
+        
+        # Check if user completed any activities yesterday
+        yesterday_completed = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.date == yesterday,
+            UserActivity.is_completed_today == True
+        ).count() > 0
+        
+        # Get today's completed activities count
+        completed_today = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.is_completed_today == True
+        ).count()
+        
+        # Get total selected (bookmarked) activities
+        selected_activities = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.is_active == True
+        ).count()
+        
+        # Calculate current multiplier based on streak
+        current_multiplier = max(1, min(user.streak_days, 4))
+        
+        print(f"[DEBUG] User stats - Level: {current_level}, XP: {user.current_xp}, Streak: {user.streak_days}, Yesterday completed: {yesterday_completed}")
+        
+        return jsonify({
+            'level': current_level,
+            'current_xp': user.current_xp,
+            'xp_to_next_level': xp_to_next,
+            'streak_days': user.streak_days,
+            'multiplier': current_multiplier,
+            'completed_today': completed_today,
+            'total_activities': selected_activities
+        })
+    except Exception as e:
+        print(f"Error in get_user_stats: {str(e)}")
+        return jsonify({
+            'error': 'Failed to fetch user stats',
+            'level': 1,
+            'current_xp': 0,
+            'xp_to_next_level': 300,  # Starting XP requirement
+            'streak_days': 0,
+            'multiplier': 1,
+            'completed_today': 0,
+            'total_activities': 0
+        }), 500 

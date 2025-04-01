@@ -37,21 +37,35 @@ class Activity(db.Model):
 class UserActivity(db.Model):
     __tablename__ = 'user_activities'
     __table_args__ = (
-        db.UniqueConstraint('user_id', 'activity_id', name='unique_user_activity'),
+        db.UniqueConstraint('user_id', 'activity_id', name='_user_activity_uc'),
         {'extend_existing': True}
     )
     
     id = db.Column(db.String(36), primary_key=True)
     user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
-    activity_id = db.Column(db.String(36), db.ForeignKey('activities.id'), nullable=False)  # Changed to match Activity.id
+    activity_id = db.Column(db.String(36), db.ForeignKey('activities.id'), nullable=False)
     activity_name = db.Column(db.String(100), nullable=False)
     category = db.Column(db.String(50), nullable=False)
     type = db.Column(db.String(50))
     completed = db.Column(db.Boolean, default=False)
-    is_active = db.Column(db.Boolean, default=True)
+    is_active = db.Column(db.Boolean, default=True)  # Used for bookmarked activities
+    is_completed_today = db.Column(db.Boolean, default=False)  # Used for today's completed activities
     date = db.Column(db.Date, default=lambda: datetime.now(timezone.utc).date())
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'activity_id': self.activity_id,
+            'activity_name': self.activity_name,
+            'category': self.category,
+            'type': self.type,
+            'completed': self.completed,
+            'is_active': self.is_active,
+            'is_completed_today': self.is_completed_today,
+            'date': self.date.isoformat() if self.date else None
+        }
 
 class UserActivityLog(db.Model):
     __tablename__ = 'user_activity_logs'

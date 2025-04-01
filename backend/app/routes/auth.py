@@ -142,3 +142,22 @@ def protected():
     except Exception as e:
         print(f"Protected route error: {str(e)}")
         return jsonify({'error': 'Access denied'}), 401
+
+@auth_bp.route('/profile', methods=['GET'])
+@jwt_required()
+def get_profile():
+    try:
+        current_user_id = get_jwt_identity()
+        user = User.query.get_or_404(current_user_id)
+        
+        return jsonify({
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'level': user.level,
+            'current_xp': user.current_xp,
+            'streak_days': user.streak_days
+        })
+    except Exception as e:
+        print(f"Profile route error: {str(e)}")
+        return jsonify({'error': 'Failed to fetch profile'}), 500
