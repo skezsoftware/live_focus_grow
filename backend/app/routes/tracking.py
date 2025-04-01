@@ -13,6 +13,8 @@ import math
 
 tracking_bp = Blueprint('tracking', __name__)
 
+TEST_MODE = True  # Temporary flag for testing streak/multiplier logic
+
 def calculate_xp_for_level(level):
     """Calculate XP needed for a specific level."""
     return int(500 + pow(level, 1.5))
@@ -673,16 +675,14 @@ def toggle_activity(activity_id):
     
     try:
         print(f"[DEBUG] Toggle activity request for user {user_id}, activity {activity_id}")
-        print(f"[DEBUG] Initial user state - Level: {user.level}, XP: {user.current_xp}, Streak: {user.streak_days}")
         
         # Find the activity
         db_activity = Activity.query.get(activity_id)
         if not db_activity:
             return jsonify({'error': 'Activity not found'}), 404
         
-        # Get today's and yesterday's dates
+        # Get today's date
         today = datetime.now(timezone.utc).date()
-        yesterday = today - timedelta(days=1)
         
         # Check if this is a completion request or just a selection toggle
         is_completion = False
@@ -692,13 +692,6 @@ def toggle_activity(activity_id):
             is_completion = request.get_json().get('is_completion', False)
             
         print(f"[DEBUG] Request type - is_completion: {is_completion}")
-        
-        # Initialize response values
-        message = ""
-        xp_gained = 0
-        new_level = user.level
-        xp_to_next = calculate_xp_for_level(user.level + 1)
-        current_multiplier = 1  # Default multiplier
         
         # First, try to find any existing record for this activity (regardless of date)
         existing_activity = UserActivity.query.filter(
@@ -717,54 +710,10 @@ def toggle_activity(activity_id):
                     existing_activity.is_completed_today = True
                     # Don't modify is_active when completing
                     print(f"[DEBUG] Completing activity - preserving is_active={existing_activity.is_active}")
-                    
-                    # Calculate XP gain using current streak (before any updates)
-                    base_xp = 100
-                    
-                    # Check if user completed any activities yesterday
-                    yesterday_completed = UserActivity.query.filter(
-                        UserActivity.user_id == user_id,
-                        UserActivity.date == yesterday,
-                        UserActivity.is_completed_today == True
-                    ).count() > 0
-                    
-                    # Update streak based on yesterday's completion
-                    if yesterday_completed:
-                        user.streak_days = min(user.streak_days + 1, 4)
-                        print(f"[DEBUG] Streak continued - new streak: {user.streak_days}")
-                    else:
-                        user.streak_days = 1
-                        print(f"[DEBUG] Streak reset - new streak: 1")
-                    
-                    # Calculate multiplier based on current streak
-                    current_multiplier = max(1, min(user.streak_days, 4))
-                    xp_gained = base_xp * current_multiplier
-                    print(f"[DEBUG] XP Calculation - Base XP: {base_xp}, Current Streak: {user.streak_days}, Multiplier: {current_multiplier}")
-                    
-                    # Update user's XP
-                    user.current_xp += xp_gained
-                    
-                    # Calculate new level based on current XP
-                    new_level, xp_to_next = get_current_level_and_next_xp(user.current_xp)
-                    user.level = new_level
-                    
-                    message = f"Activity completed! You earned {xp_gained} XP with a {current_multiplier}x multiplier!"
-                    if new_level > user.level:
-                        message += f" Level up! You are now level {new_level}!"
-                    
-                    print(f"[DEBUG] Activity completed - XP gained: {xp_gained}, New streak: {user.streak_days}")
+                    message = "Activity marked as complete"
                 else:
-                    message = "Activity already completed today"
+                    message = "Activity already completed today - no changes made"
                     print("[DEBUG] Activity was already completed today - no changes made")
-                    return jsonify({
-                        'message': message,
-                        'completed': True,
-                        'is_active': existing_activity.is_active,
-                        'level': user.level,
-                        'current_xp': user.current_xp,
-                        'streak_days': user.streak_days,
-                        'multiplier': current_multiplier
-                    })
             else:
                 # Just toggle selection state
                 existing_activity.is_active = not existing_activity.is_active
@@ -787,58 +736,49 @@ def toggle_activity(activity_id):
             db.session.add(new_activity)
             print(f"[DEBUG] Created new activity record - completed: {is_completion}, is_active: true")
             message = "Activity selection created"
-            
-            # If this is a completion, handle XP and streak updates
-            if is_completion:
-                base_xp = 100
-                
-                # Check if user completed any activities yesterday
-                yesterday_completed = UserActivity.query.filter(
-                    UserActivity.user_id == user_id,
-                    UserActivity.date == yesterday,
-                    UserActivity.is_completed_today == True
-                ).count() > 0
-                
-                # Update streak based on yesterday's completion
-                if yesterday_completed:
-                    user.streak_days = min(user.streak_days + 1, 4)
-                    print(f"[DEBUG] Streak continued - new streak: {user.streak_days}")
-                else:
-                    user.streak_days = 1
-                    print(f"[DEBUG] Streak reset - new streak: 1")
-                
-                # Calculate multiplier based on current streak
-                current_multiplier = max(1, min(user.streak_days, 4))
-                xp_gained = base_xp * current_multiplier
-                user.current_xp += xp_gained
-                new_level, xp_to_next = get_current_level_and_next_xp(user.current_xp)
-                user.level = new_level
+        
+        # Check if all selected activities have been completed
+        total_selected = UserActivity.query.filter_by(user_id=user_id, is_active=True).count()
+        completed_today = UserActivity.query.filter_by(user_id=user_id, is_completed_today=True, date=today).count()
+
+        print(f"[DEBUG] Completion check - {completed_today}/{total_selected} activities complete")
+
+        if total_selected > 0 and completed_today == total_selected:
+            base_xp = 500
+            user.streak_days = min(user.streak_days + 1, 4) if TEST_MODE else min(user.streak_days + 1, 4)
+            multiplier = max(1, min(user.streak_days, 4))
+            xp_gained = base_xp * multiplier
+            user.current_xp += xp_gained
+            new_level, xp_to_next = get_current_level_and_next_xp(user.current_xp)
+            user.level = new_level
+            message = f"🔥 All activities complete! {xp_gained} XP earned with {multiplier}x streak!"
+        else:
+            message = "✅ Activity marked complete, but full XP/streak requires completing all activities."
         
         db.session.commit()
         
-        print(f"[DEBUG] Final user state - Level: {user.level}, XP: {user.current_xp}, Streak: {user.streak_days}")
+        # Get count of completed activities today
+        completed_today = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.is_completed_today == True
+        ).count()
         
         # Return appropriate response based on operation type
         if is_completion:
             return jsonify({
                 'message': message,
                 'completed': True,
-                'level': new_level,
-                'current_xp': user.current_xp,
-                'xp_to_next_level': xp_to_next,
-                'streak_days': user.streak_days,
-                'multiplier': current_multiplier,
-                'xp_gained': xp_gained,
-                'is_active': existing_activity.is_active if existing_activity else True
+                'is_active': existing_activity.is_active if existing_activity else True,
+                'completed_today_count': completed_today,
+                'can_submit_daily': completed_today >= 3
             })
         else:
             return jsonify({
                 'message': message,
                 'completed': False,
                 'is_active': existing_activity.is_active if existing_activity else True,
-                'level': user.level,
-                'current_xp': user.current_xp,
-                'streak_days': user.streak_days
+                'completed_today_count': completed_today,
+                'can_submit_daily': completed_today >= 3
             })
         
     except Exception as e:
@@ -944,16 +884,18 @@ def get_user_stats():
         # Calculate current level and XP needed for next level
         current_level, xp_to_next = get_current_level_and_next_xp(user.current_xp)
         
-        # Get today's and yesterday's dates
+        # Get today's date
         today = datetime.now(timezone.utc).date()
-        yesterday = today - timedelta(days=1)
         
-        # Check if user completed any activities yesterday
-        yesterday_completed = UserActivity.query.filter(
-            UserActivity.user_id == user_id,
-            UserActivity.date == yesterday,
-            UserActivity.is_completed_today == True
-        ).count() > 0
+        # In testing mode, we don't need to check yesterday's completion
+        if not TEST_MODE:
+            yesterday = today - timedelta(days=1)
+            yesterday_completed = UserActivity.query.filter(
+                UserActivity.user_id == user_id,
+                UserActivity.date == yesterday,
+                UserActivity.is_completed_today == True
+            ).count() > 0
+            print(f"[DEBUG] Yesterday completed: {yesterday_completed}")
         
         # Get today's completed activities count
         completed_today = UserActivity.query.filter(
@@ -970,7 +912,7 @@ def get_user_stats():
         # Calculate current multiplier based on streak
         current_multiplier = max(1, min(user.streak_days, 4))
         
-        print(f"[DEBUG] User stats - Level: {current_level}, XP: {user.current_xp}, Streak: {user.streak_days}, Yesterday completed: {yesterday_completed}")
+        print(f"[DEBUG] User stats - Level: {current_level}, XP: {user.current_xp}, Streak: {user.streak_days}")
         
         return jsonify({
             'level': current_level,
@@ -992,4 +934,134 @@ def get_user_stats():
             'multiplier': 1,
             'completed_today': 0,
             'total_activities': 0
-        }), 500 
+        }), 500
+    
+@tracking_bp.route('/reset-user', methods=['POST'])
+@jwt_required()
+def reset_user_progress():
+    user_id = get_jwt_identity()
+    user = User.query.get_or_404(user_id)
+
+    try:
+        # Reset user stats
+        user.current_xp = 0
+        user.level = 1
+        user.streak_days = 0
+
+        # Reset all user activity records
+        user_activities = UserActivity.query.filter_by(user_id=user_id).all()
+        for ua in user_activities:
+            ua.completed = False
+            ua.is_completed_today = False
+            ua.is_active = False
+            ua.date = datetime.now(timezone.utc).date()
+
+        db.session.commit()
+        print(f"[DEBUG] User {user_id} progress reset successfully")
+        return jsonify({'message': 'User progress reset successfully'})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[ERROR] Failed to reset user progress: {str(e)}")
+        return jsonify({'error': 'Failed to reset user progress'}), 500
+
+@tracking_bp.route('/submit-daily', methods=['POST'])
+@jwt_required()
+def submit_daily():
+    user_id = get_jwt_identity()
+    user = User.query.get_or_404(user_id)
+    
+    try:
+        print(f"[DEBUG] Daily submission request for user {user_id}")
+        
+        # Get today's date
+        today = datetime.now(timezone.utc).date()
+        
+        # Check if user has already submitted today
+        today_submission = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.date == today,
+            UserActivity.is_completed_today == True
+        ).first()
+        
+        if today_submission:
+            return jsonify({
+                'error': 'You have already submitted your activities for today',
+                'completed_today_count': UserActivity.query.filter(
+                    UserActivity.user_id == user_id,
+                    UserActivity.is_completed_today == True
+                ).count()
+            }), 400
+        
+        # Get count of completed activities today
+        completed_today = UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.is_completed_today == True
+        ).count()
+        
+        if completed_today < 3:
+            return jsonify({
+                'error': f'You need to complete at least 3 activities before submitting. Currently completed: {completed_today}',
+                'completed_today_count': completed_today,
+                'can_submit_daily': False
+            }), 400
+        
+        # Defensive defaults to prevent NaN or undefined values
+        base_xp = 100
+        current_level = getattr(user, 'level', 1) or 1
+        current_streak = getattr(user, 'streak_days', 0) or 0
+        current_xp = getattr(user, 'current_xp', 0) or 0
+        
+        # Cap the streak multiplier at 4x
+        streak_multiplier = max(1, min(current_streak, 4))
+        
+        # XP calculation with safe values
+        total_xp_gained = base_xp * completed_today * streak_multiplier
+        user.current_xp = current_xp + total_xp_gained
+        
+        # Update streak and level
+        user.streak_days = min(current_streak + 1, 4)  # Cap streak at 4 days
+        new_level, xp_to_next = get_current_level_and_next_xp(user.current_xp)
+        user.level = new_level
+        
+        # Mark all completed activities as submitted
+        UserActivity.query.filter(
+            UserActivity.user_id == user_id,
+            UserActivity.is_completed_today == True
+        ).update({
+            'date': today
+        })
+        
+        # Commit all changes to the database
+        db.session.commit()
+        
+        print(f"[DEBUG] XP CALCULATION — Level: {current_level}, Streak: {current_streak}, Completed: {completed_today}, Multiplier: {streak_multiplier}, Total XP Gained: {total_xp_gained}")
+        print(f"[DEBUG] Final user state - Level: {user.level}, XP: {user.current_xp}, Streak: {user.streak_days}")
+        
+        # Safe response return with all necessary values and proper defaults
+        return jsonify({
+            'message': f"Daily activities submitted! You earned {total_xp_gained} XP with a {streak_multiplier}x multiplier!",
+            'xp': user.current_xp or 0,
+            'level': user.level or 1,
+            'streak': user.streak_days or 0,
+            'totalXpGained': total_xp_gained or 0,
+            'xp_to_next_level': xp_to_next or 0,
+            'multiplier': streak_multiplier or 1,
+            'completed_today_count': completed_today or 0,
+            'can_submit_daily': False  # Disable submit button after successful submission
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"[ERROR] Error in submit_daily: {str(e)}")
+        # Error-safe response with defensive defaults
+        return jsonify({
+            'error': str(e),
+            'xp': getattr(user, 'current_xp', 0) or 0,
+            'level': getattr(user, 'level', 1) or 1,
+            'streak': getattr(user, 'streak_days', 0) or 0,
+            'totalXpGained': 0,
+            'completed_today_count': UserActivity.query.filter(
+                UserActivity.user_id == user_id,
+                UserActivity.is_completed_today == True
+            ).count() or 0
+        }), 500
